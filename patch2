@@ -1,0 +1,120 @@
+// scripts/cleanup-assets.js
+// Moves images from /assets -> /public and rewrites references to /<filename>
+// Works for TS/JS/JSX/TSX/CSS/SCSS/MDX/HTML.
+// Run: node scripts/cleanup-assets.js
+
+const fs = require("fs");
+const path = require("path");
+
+const repoRoot = process.cwd();
+const assetsDir = path.join(repoRoot, "assets");
+const publicDir = path.join(repoRoot, "public");
+const exts = [".png",".jpg",".jpeg",".webp",".gif",".svg"];
+
+function ensureDir(p){ if(!fs.existsSync(p)) fs.mkdirSync(p, {recursive:true}); }
+function globWalk(dir, filter=()=>true, acc=[]){
+  if(!fs.existsSync(dir)) return acc;
+  for(const name of fs.readdirSync(dir)){
+    const p = path.join(dir, name);
+    const st = fs.statSync(p);
+    if(st.isDirectory()) globWalk(p, filter, acc);
+    else if(filter(p)) acc.push(p);
+  }
+  return acc;
+}
+
+function uniquePath(baseDir, baseName){
+  let dest = path.join(baseDir, baseName);
+  let i=1;
+  const ext = path.extname(baseName);
+  const stem = path.basename(baseName, ext);
+  while(fs.existsSync(dest)){
+    dest = path.join(baseDir, `${stem}-${i}${ext}`);
+    i++;
+  }
+  return dest;
+}
+
+function moveImages(){
+  if(!fs.existsSync(assetsDir)) return [];
+  ensureDir(publicDir);
+  const imgs = globWalk(assetsDir, p => exts.includes(path.extname(p).toLowerCase()));
+  const mapping = [];
+  for(const src of imgs){
+    const base = path.basename(src);
+    const dest = uniquePath(publicDir, base);
+    fs.renameSync(src, dest);
+    mapping.push({ src, dest, webPath: "/" + path.basename(dest) });
+    console.log(`Moved: ${src} -> ${dest}`);
+  }
+  return mapping;
+}
+
+function rewriteFile(file, mapping){
+  let text = fs.readFileSync(file, "utf8");
+  let changed = false;
+
+  // Replace src="assets/..." and src="./assets/..." with src="/filename"
+  text = text.replace(/src=(["'])\.?\/?assets\/([^"']+)\1/gi, (m, q, p2) => {
+    changed = true;
+    return `src=${q}/${path.basename(p2)}${q}`;
+  });
+
+  // Replace url(assets/...) in CSS
+  text = text.replace(/url\((["']?)\.?\/?assets\/([^)"']+)\1\)/gi, (m, q, p2) => {
+    changed = true;
+    return `url(/${path.basename(p2)})`;
+  });
+
+  // Remove import logo from "../assets/xxx.png"
+  // and replace <Image src={logo}/> or <img src={logo}/> with absolute path
+  text = text.replace(/import\s+(\w+)\s+from\s+["']([^"']*assets\/([^"']+))["'];?/gi, (m, varName, full, rel) => {
+    const web = "/" + path.basename(rel);
+    // Remove the import line
+    let out = "";
+    // Replace usages
+    const re1 = new RegExp(`(<Image[^>]*?\\ssrc=)\\{${varName}\\}`, "g");
+    const re2 = new RegExp(`(<img[^>]*?\\ssrc=)\\{${varName}\\}`, "g");
+    out = text.replace(m, "");
+    out = out.replace(re1, `$1"${web}"`);
+    out = out.replace(re2, `$1"${web}"`);
+    text = out;
+    changed = true;
+    return ""; // already handled by out assignment
+  });
+
+  if(changed){
+    fs.writeFileSync(file, text, "utf8");
+    console.log(`Updated refs: ${file}`);
+  }
+}
+
+function rewriteCode(mapping){
+  const codeDirs = ["src","app","pages","components","."]; // scan common roots
+  const files = [];
+  for(const d of codeDirs){
+    const p = path.join(repoRoot, d);
+    if(!fs.existsSync(p)) continue;
+    globWalk(p, f => /\.(tsx?|jsx?|css|scss|mdx?|html)$/i.test(f), files);
+  }
+  for(const f of files) rewriteFile(f, mapping);
+}
+
+function removeEmptyAssets(){
+  if(!fs.existsSync(assetsDir)) return;
+  const remaining = globWalk(assetsDir, p => true);
+  if(remaining.length === 0){
+    fs.rmSync(assetsDir, { recursive: true, force: true });
+    console.log("Removed empty /assets directory.");
+  } else {
+    console.log(`/assets still contains files (${remaining.length}); left as-is.`);
+  }
+}
+
+(function main(){
+  console.log("== Kickfixx Next.js assets cleanup ==");
+  const moved = moveImages();
+  rewriteCode(moved);
+  removeEmptyAssets();
+  console.log("Done. Rebuild & visit /kickfixx-logo-00B8FF.png and /vending-mockup.png directly.");
+})();
